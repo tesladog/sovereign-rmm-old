@@ -1,0 +1,143 @@
+"""Inventory — asset management, asset tag lookup, device linking."""
+import uuid
+from datetime import datetime
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, or_
+from models import Asset, Device
+from main import get_db
+
+router = APIRouter()
+
+
+@router.get("/")
+async def list_assets(db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Asset).order_by(Asset.asset_tag))
+    assets = result.scalars().all()
+    out = []
+    for a in assets:
+        device = None
+        if a.device_id:
+            d = await db.execute(select(Device).where(Device.device_id == a.device_id))
+            dev = d.scalar_one_or_none()
+            if dev:
+                device = {"status": dev.status, "hostname": dev.hostname, "ip": dev.ip_address}
+        out.append(_asset_dict(a, device))
+    return out
+
+
+@router.get("/lookup/{tag}")
+async def lookup_by_tag(tag: str, db: AsyncSession = Depends(get_db)):
+    """
+    Look up an asset by tag number (e.g. 2026-002).
+    Also searches by name, model, serial for flexibility.
+    """
+    result = await db.execute(
+        select(Asset).where(
+            or_(
+                Asset.asset_tag.ilike(f"%{tag}%"),
+                Asset.name.ilike(f"%{tag}%"),
+                Asset.serial_number.ilike(f"%{tag}%"),
+            )
+        )
+    )
+    assets = result.scalars().all()
+    if not assets:
+        raise HTTPException(status_code=404, detail=f"No asset found matching '{tag}'")
+    out = []
+    for a in assets:
+        device = None
+        if a.device_id:
+            d = await db.execute(select(Device).where(Device.device_id == a.device_id))
+            dev = d.scalar_one_or_none()
+            if dev:
+                device = {"status": dev.status, "hostname": dev.hostname, "ip": dev.ip_address,
+                          "last_seen": dev.last_seen.isoformat() if dev.last_seen else None}
+        out.append(_asset_dict(a, device))
+    return out[0] if len(out) == 1 else out
+
+
+@router.post("/")
+async def create_asset(data: dict, db: AsyncSession = Depends(get_db)):
+    # Check for duplicate asset tag
+    existing = await db.execute(select(Asset).where(Asset.asset_tag == data.get("asset_tag")))
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Asset tag already exists")
+    asset = Asset(
+        id=str(uuid.uuid4()),
+        asset_tag=data.get("asset_tag", ""),
+        name=data.get("name", ""),
+        model=data.get("model"),
+        owner=data.get("owner"),
+        location=data.get("location"),
+        category=data.get("category"),
+        serial_number=data.get("serial_number"),
+        purchase_date=datetime.fromisoformat(data["purchase_date"]) if data.get("purchase_date") else None,
+        notes=data.get("notes", ""),
+        status=data.get("status", "active"),
+        google_form_url=data.get("google_form_url"),
+        device_id=data.get("device_id"),
+    )
+    db.add(asset)
+    await db.commit()
+    return {"id": asset.id, "asset_tag": asset.asset_tag}
+
+
+@router.put("/{asset_id}")
+async def update_asset(asset_id: str, data: dict, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Asset).where(Asset.id == asset_id))
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    for field in ("name", "model", "owner", "location", "category", "serial_number",
+                  "notes", "status", "google_form_url", "device_id", "asset_tag"):
+        if field in data:
+            setattr(asset, field, data[field])
+    if data.get("purchase_date"):
+        asset.purchase_date = datetime.fromisoformat(data["purchase_date"])
+    asset.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"status": "updated"}
+
+
+@router.post("/{asset_id}/link/{device_id}")
+async def link_device(asset_id: str, device_id: str, db: AsyncSession = Depends(get_db)):
+    """Link an asset record to a managed device."""
+    result = await db.execute(select(Asset).where(Asset.id == asset_id))
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    asset.device_id = device_id
+    # Also set asset_tag on the device
+    await db.execute(
+        __import__('sqlalchemy').update(Device)
+        .where(Device.device_id == device_id)
+        .values(asset_tag=asset.asset_tag)
+    )
+    await db.commit()
+    return {"status": "linked"}
+
+
+@router.delete("/{asset_id}")
+async def delete_asset(asset_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Asset).where(Asset.id == asset_id))
+    asset = result.scalar_one_or_none()
+    if not asset:
+        raise HTTPException(status_code=404, detail="Not found")
+    await db.delete(asset)
+    await db.commit()
+    return {"status": "deleted"}
+
+
+def _asset_dict(a: Asset, device=None) -> dict:
+    return {
+        "id": a.id, "asset_tag": a.asset_tag, "name": a.name,
+        "model": a.model, "owner": a.owner, "location": a.location,
+        "category": a.category, "serial_number": a.serial_number,
+        "notes": a.notes, "status": a.status,
+        "google_form_url": a.google_form_url,
+        "device_id": a.device_id, "device": device,
+        "purchase_date": a.purchase_date.isoformat() if a.purchase_date else None,
+        "created_at": a.created_at.isoformat(),
+        "updated_at": a.updated_at.isoformat(),
+    }

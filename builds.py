@@ -1,0 +1,16 @@
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+aiofiles==23.2.1
+redis[asyncio]==5.0.4
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.9
+requests==2.31.0
+pyinstaller==6.6.0
+websockets==12.0
+httpx==0.27.0
+qrcode[pil]==7.4.2
+Pillow==10.3.0
+reportlab==4.1.0

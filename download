@@ -1,0 +1,46 @@
+"""Hardware reporting — full HW info stored per device, linked to assets."""
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from datetime import datetime
+from models import Device
+from main import get_db, redis_pool
+import json
+
+router = APIRouter()
+
+
+@router.get("/{device_id}")
+async def get_hardware(device_id: str, db: AsyncSession = Depends(get_db)):
+    result = await db.execute(select(Device).where(Device.device_id == device_id))
+    d = result.scalar_one_or_none()
+    if not d:
+        raise HTTPException(404, "Device not found")
+    return {
+        "device_id": device_id,
+        "hostname": d.label or d.hostname,
+        "hardware_info": d.hardware_info or {},
+        "scanned_at": d.hardware_scanned_at.isoformat() if d.hardware_scanned_at else None,
+    }
+
+
+@router.post("/{device_id}/scan")
+async def request_hw_scan(device_id: str):
+    """Push a hardware scan request to the agent via Redis."""
+    await redis_pool.publish("push_commands", json.dumps({
+        "type": "hw_scan_request",
+        "device_id": device_id,
+        "data": {}
+    }))
+    return {"status": "scan_requested"}
+
+
+@router.post("/{device_id}/report")
+async def store_hw_report(device_id: str, data: dict, db: AsyncSession = Depends(get_db)):
+    """Agent calls this to store hardware info."""
+    await db.execute(update(Device).where(Device.device_id == device_id).values(
+        hardware_info=data,
+        hardware_scanned_at=datetime.utcnow()
+    ))
+    await db.commit()
+    return {"status": "stored"}
